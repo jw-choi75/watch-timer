@@ -1,0 +1,161 @@
+<!-- YouTube 시청 타이머 (JavaScript + HTML + CSS)
+     🔧 2025-05-25 Patch:
+       • CSV Blob 생성 시 잘못된 줄바꿈 문자열(`'\n'` → `"\n"`)로 수정하여 SyntaxError 해결
+-->
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Watch Timer</title>
+  <link rel="preconnect" href="https://www.youtube.com">
+  <link rel="preconnect" href="https://i.ytimg.com">
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:Arial,Helvetica,sans-serif;margin:0;padding:24px;background:#f5f8ff;color:#222}
+    h1{margin-top:0;font-size:1.8rem}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    input[type=text]{flex:1 1 280px;padding:12px;font-size:1rem;border:1px solid #ccc;border-radius:6px}
+    button{padding:12px 18px;font-size:1rem;border:none;border-radius:6px;background:#4a63ff;color:#fff;cursor:pointer}
+    button:hover{background:#394dd8}
+    button[disabled]{background:#9fa8ff;cursor:not-allowed}
+    #elapsed{margin:16px 0;font-size:2rem;font-weight:600;min-height:48px}
+    #playerWrapper{aspect-ratio:16/9;max-width:960px;width:100%;background:#d6d6d6;display:flex;align-items:center;justify-content:center;border-radius:8px;overflow:hidden}
+    #player, #player iframe{width:100%!important;height:100%!important}
+    #alert{color:#c00;margin-top:12px}
+  </style>
+  <script src="https://www.youtube.com/iframe_api"></script>
+</head>
+<body>
+  <h1>YouTube Watch Timer</h1>
+  <div class="row" style="margin-bottom:8px">
+    <input id="url" type="text" placeholder="YouTube URL 또는 Video ID 입력">
+    <button id="startBtn">재생 & 타이머 시작</button>
+    <button id="pauseBtn" disabled>일시정지</button>
+    <button id="downloadBtn">CSV 다운로드</button>
+  </div>
+  <div id="elapsed">현재 시청 시간: 00:00</div>
+  <div id="playerWrapper"><div id="player"></div></div>
+  <div id="alert"></div>
+
+<script>
+let player, timerInterval, saveInterval, elapsedMs = 0, isCounting = false, currentVideoId = '';
+const pauseBtn   = document.getElementById('pauseBtn');
+const downloadBtn= document.getElementById('downloadBtn');
+const AUTO_SAVE_MS = 5000;
+
+const historyKey = 'watchHistory';
+const loadHistory = () => JSON.parse(localStorage.getItem(historyKey) || '{}');
+const saveHistory = obj => localStorage.setItem(historyKey, JSON.stringify(obj));
+let watchHistory  = loadHistory();
+
+function restoreLastSession(){
+  const last = localStorage.getItem('lastVideoId');
+  if(last && watchHistory[last]?.session){
+    document.getElementById('url').value = last;
+    createPlayer(last,true);
+  }
+}
+function onYouTubeIframeAPIReady(){ restoreLastSession(); }
+
+function parseVideoId(input){
+  const m = input.match(/(?:youtube\.com\/(?:.*v=|.*\/)|youtu\.be\/)([\w-]{11})/);
+  return m ? m[1] : input.trim();
+}
+function updateDisplay(ms){
+  const sec = Math.floor(ms/1000)%60;
+  const min = Math.floor(ms/60000)%60;
+  document.getElementById('elapsed').textContent = `현재 시청 시간: ${String(min).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+function backupSession(){
+  if(!currentVideoId) return;
+  watchHistory[currentVideoId] ??= {total:0, session:0, lastWatched:''};
+  watchHistory[currentVideoId].session = elapsedMs;
+  saveHistory(watchHistory);
+  localStorage.setItem('lastVideoId', currentVideoId);
+}
+function startAutoSave(){ clearInterval(saveInterval); saveInterval = setInterval(backupSession, AUTO_SAVE_MS); }
+function clearAutoSave(){ clearInterval(saveInterval); backupSession(); }
+
+function startTimer(){
+  clearInterval(timerInterval);
+  timerInterval = setInterval(()=>{elapsedMs+=1000;updateDisplay(elapsedMs);},1000);
+  isCounting = true;
+  pauseBtn.textContent = '일시정지';
+  pauseBtn.disabled = false;
+  startAutoSave();
+}
+function resumeTimer(){ if(isCounting) return; startTimer(); }
+function pauseTimer(){ clearInterval(timerInterval); isCounting=false; pauseBtn.textContent='재개'; clearAutoSave(); }
+
+function stopTimer(keepSession=false){
+  clearInterval(timerInterval); clearAutoSave(); pauseBtn.disabled = true;
+  if(currentVideoId){
+    watchHistory[currentVideoId] ??= {total:0, session:0, lastWatched:''};
+    if(!keepSession){
+      watchHistory[currentVideoId].total += Math.floor(elapsedMs/1000);
+      watchHistory[currentVideoId].session = 0;
+      localStorage.removeItem('lastVideoId');
+    }
+    watchHistory[currentVideoId].lastWatched = new Date().toISOString();
+    saveHistory(watchHistory);
+  }
+  isCounting = false;
+}
+
+function createPlayer(videoId, restore=false){
+  const prev = watchHistory[videoId]?.session || 0;
+  if(player) player.destroy();
+  stopTimer(true);
+  currentVideoId = videoId;
+  elapsedMs = (restore||prev>0)?prev:0;
+  updateDisplay(elapsedMs);
+
+  player = new YT.Player('player',{
+    videoId,
+    playerVars:{autoplay:1,playsinline:1},
+    events:{
+      onReady:()=>{
+        player.setSize('100%','100%');
+        if(elapsedMs>0) player.seekTo(elapsedMs/1000, true);
+      },
+      onStateChange:e=>{
+        switch(e.data){
+          case YT.PlayerState.PLAYING: isCounting?null:(elapsedMs>0?resumeTimer():startTimer()); break;
+          case YT.PlayerState.PAUSED:
+          case YT.PlayerState.BUFFERING: if(isCounting) pauseTimer(); break;
+          case YT.PlayerState.ENDED: stopTimer(); break;
+        }
+      }
+    }
+  });
+}
+
+document.getElementById('startBtn').addEventListener('click',()=>{
+  const id = parseVideoId(document.getElementById('url').value.trim());
+  if(id.length!==11){ alert('유효하지 않은 영상 ID'); return; }
+  createPlayer(id);
+});
+
+pauseBtn.addEventListener('click',()=>{ if(!player) return; isCounting?player.pauseVideo():player.playVideo(); });
+
+downloadBtn.addEventListener('click',()=>{
+  // 세션 누락 방지: 즉시 저장
+  backupSession();
+  const rows = [['videoId','totalSeconds','lastWatched']];
+  for(const [vid,d] of Object.entries(watchHistory)){
+    const total = d.total + (vid===currentVideoId?Math.floor(elapsedMs/1000):0);
+    rows.push([vid,total,d.lastWatched || '']);
+  }
+  const csvString = rows.map(r=>r.join(',')).join('\n'); // <-- 올바른 줄바꿈
+  const blob = new Blob([csvString], {type:'text/csv'});
+  const url  = URL.createObjectURL(blob);
+  Object.assign(document.createElement('a'), {href:url, download:'watch_history.csv'}).click();
+  URL.revokeObjectURL(url);
+});
+
+window.addEventListener('beforeunload', clearAutoSave);
+</script>
+</body>
+</html>
+
